@@ -48,7 +48,8 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     timezone TEXT NOT NULL DEFAULT 'UTC',
                     reminder_offsets TEXT NOT NULL DEFAULT '[3,0]',
-                    reminder_time TEXT NOT NULL DEFAULT '09:00'
+                    reminder_time TEXT NOT NULL DEFAULT '09:00',
+                    default_currency TEXT DEFAULT 'EUR'
                 );
                 CREATE TABLE IF NOT EXISTS invoices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +96,13 @@ class Database:
                 );
                 """
             )
+            user_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(users)")
+            }
+            if "default_currency" not in user_columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN default_currency TEXT DEFAULT 'EUR'"
+                )
             invoice_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(invoices)")
             }
@@ -120,7 +128,7 @@ class Database:
             ).fetchone()
 
     def update_user(self, user_id: int, **fields):
-        allowed = {"timezone", "reminder_offsets", "reminder_time"}
+        allowed = {"timezone", "reminder_offsets", "reminder_time", "default_currency"}
         if not fields or not set(fields).issubset(allowed):
             raise ValueError("Invalid user settings.")
         self.ensure_user(user_id)

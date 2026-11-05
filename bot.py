@@ -32,8 +32,8 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-TITLE, AMOUNT, CURRENCY, DUE, FREQUENCY, CUSTOM, END_RULE, END_VALUE = range(8)
-INITIAL_PAYMENT, PAYMENT_DATE, EDIT_FIELD, EDIT_VALUE, PAYMENT_AMOUNT, SETTINGS_TZ, SETTINGS_OFFSETS, SETTINGS_TIME = range(8, 16)
+TITLE, DUE = range(2)
+PAYMENT_AMOUNT, PAYMENT_DATE, EDIT_FIELD, EDIT_VALUE, SETTINGS_TZ, SETTINGS_OFFSETS, SETTINGS_TIME, SETTINGS_CURRENCY = range(2, 10)
 
 
 def load_local_env():
@@ -59,7 +59,18 @@ def user_today(user_id: int) -> date:
 
 
 def skip_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="skip")]])
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Skip", callback_data="skip"),
+            InlineKeyboardButton("Cancel", callback_data="cancel"),
+        ]]
+    )
+
+
+def cancel_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Cancel", callback_data="cancel")]]
+    )
 
 
 async def reject_group_callback(update: Update) -> bool:
@@ -100,35 +111,15 @@ async def send_next(update, context, text, state, keyboard=None):
     return state
 
 
-def frequency_keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("One time", callback_data="freq:once"),
-                InlineKeyboardButton("Weekly", callback_data="freq:weekly"),
-            ],
-            [
-                InlineKeyboardButton("Monthly", callback_data="freq:monthly"),
-                InlineKeyboardButton("Quarterly", callback_data="freq:quarterly"),
-            ],
-            [
-                InlineKeyboardButton("Yearly", callback_data="freq:yearly"),
-                InlineKeyboardButton("Custom", callback_data="freq:custom"),
-            ],
-            [InlineKeyboardButton("Skip (one time)", callback_data="freq:once")],
-        ]
-    )
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.ensure_user(update.effective_user.id)
     await update.message.reply_text(
         "Hi! I can remind you about bills and keep a payment history.\n\n"
-        "Use /add to create a reminder. At each step you can skip optional details.\n"
+        "Use /add to create a reminder with just a name and due date. Add other details later from /list.\n"
         "/list - view and manage invoices\n"
         "/upcoming - due soon and overdue\n"
         "/history - payment history\n"
-        "/settings - timezone and reminder preferences\n"
+        "/settings - timezone, reminder preferences, and default currency\n"
         "/help - all commands and tips"
     )
 
@@ -140,10 +131,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/list - list, edit, pause, or resume invoices\n"
         "/upcoming - see payments due in the next 30 days\n"
         "/history - review up to 50 recorded payments\n"
-        "/settings - set timezone, reminder lead days, and reminder time\n"
+        "/settings - set timezone, reminder preferences, and default currency\n"
         "/cancel - cancel the current setup\n\n"
-        "You can skip optional answers. Use dates like 2026-12-15 and amounts "
-        "like 49.99. Reminder days accept values such as 3,0 (three days before "
+        "To add a reminder, /add asks only for a name and required due date. "
+        "Add amount, currency, and recurrence later from /list. Use dates like "
+        "2026-12-15. Amounts can include a currency, e.g. 49.99 EUR; otherwise "
+        "your default currency from /settings is used. "
+        "Reminder days accept values such as 3,0 (three days before "
         "and on the due date). Mark paid records the remaining installment; "
         "Partial payment records a payment without advancing the schedule."
     )
@@ -155,176 +149,47 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await send_next(
         update,
         context,
-        "What is this payment for? Send a name or skip for “Untitled invoice”.",
+        "Let's add an invoice. First, what is this payment for? A name is required.",
         TITLE,
-        skip_keyboard(),
+        cancel_keyboard(),
     )
 
 
 async def get_title(update, context):
     value = update.effective_message.text.strip()
-    context.user_data["draft"]["title"] = (
-        "Untitled invoice" if value.lower() == "/skip" else value[:80] or "Untitled invoice"
+    if not value:
+        await update.effective_message.reply_text("Enter a name for this invoice.")
+        return TITLE
+    context.user_data["draft"]["title"] = value[:80]
+    return await send_next(
+        update,
+        context,
+        "When is it due? Enter a date in YYYY-MM-DD format (required).",
+        DUE,
+        cancel_keyboard(),
     )
-    return await send_next(update, context, "Amount? You can skip or enter a number like 49.99.", AMOUNT, skip_keyboard())
 
 
-async def get_amount(update, context):
-    text = update.effective_message.text.strip()
-    draft = context.user_data["draft"]
-    if text.lower() == "/skip":
-        draft["amount_minor"] = None
-    else:
-        try:
-            amount, currency = parse_money(text)
-        except InputError as exc:
-            await update.effective_message.reply_text(str(exc))
-            return AMOUNT
-        draft["amount_minor"] = amount
-        draft["currency"] = currency
-    if draft.get("currency"):
-        return await send_next(update, context, "Next due date? Use YYYY-MM-DD, or skip if not known.", DUE, skip_keyboard())
-    return await send_next(update, context, "Currency code? For example EUR or USD. Skip if you do not want to set one.", CURRENCY, skip_keyboard())
-
-
-async def get_currency(update, context):
-    text = update.effective_message.text.strip()
-    if text.lower() == "/skip":
-        context.user_data["draft"]["currency"] = None
-    elif len(text) == 3 and text.isalpha():
-        context.user_data["draft"]["currency"] = text.upper()
-    else:
-        await update.effective_message.reply_text("Enter a three-letter code such as EUR, or /skip.")
-        return CURRENCY
-    return await send_next(update, context, "Next due date? Use YYYY-MM-DD, or skip if not known.", DUE, skip_keyboard())
+async def required_skip(update, context):
+    draft = context.user_data.get("draft", {})
+    if "title" not in draft:
+        await update.effective_message.reply_text("A name is required. Enter what this payment is for.")
+        return TITLE
+    await update.effective_message.reply_text(
+        "A due date is required. Enter it as YYYY-MM-DD."
+    )
+    return DUE
 
 
 async def get_due(update, context):
     value = update.effective_message.text.strip()
     if value.lower() == "/skip":
-        context.user_data["draft"]["next_due"] = None
-    else:
-        try:
-            context.user_data["draft"]["next_due"] = parse_date(value).isoformat()
-        except InputError as exc:
-            await update.effective_message.reply_text(str(exc))
-            return DUE
-    return await send_next(update, context, "How often does it recur?", FREQUENCY, frequency_keyboard())
-
-
-async def set_frequency(update, context):
-    if await reject_group_callback(update):
-        return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    frequency = query.data.split(":", 1)[1]
-    context.user_data["draft"]["frequency"] = frequency
-    if frequency == "custom":
-        return await send_next(update, context, "How many days between payments? Enter a number from 1 to 3650.", CUSTOM, skip_keyboard())
-    context.user_data["draft"]["interval_days"] = None
-    if frequency == "once":
-        context.user_data["draft"]["end_after_count"] = 1
-        context.user_data["draft"]["end_date"] = None
-        return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-    return await send_next(update, context, "When should reminders stop?", END_RULE, end_keyboard())
-
-
-def end_keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("After X payments", callback_data="end:count"),
-                InlineKeyboardButton("On a date", callback_data="end:date"),
-            ],
-            [
-                InlineKeyboardButton("Keep going", callback_data="end:forever"),
-                InlineKeyboardButton("Skip", callback_data="end:forever"),
-            ],
-        ]
-    )
-
-
-async def get_custom_interval(update, context):
+        return await required_skip(update, context)
     try:
-        interval = int(update.effective_message.text.strip())
-        if not 1 <= interval <= 3650:
-            raise ValueError
-    except ValueError:
-        await update.effective_message.reply_text("Enter a whole number from 1 to 3650.")
-        return CUSTOM
-    context.user_data["draft"]["interval_days"] = interval
-    return await send_next(update, context, "When should reminders stop?", END_RULE, end_keyboard())
-
-
-async def set_end_rule(update, context):
-    if await reject_group_callback(update):
-        return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    rule = query.data.split(":", 1)[1]
-    if rule == "count":
-        context.user_data["draft"]["end_mode"] = "count"
-        return await send_next(update, context, "After how many payments should I stop? Enter a positive whole number.", END_VALUE, skip_keyboard())
-    if rule == "date":
-        context.user_data["draft"]["end_mode"] = "date"
-        return await send_next(update, context, "Enter the final date to remind you, in YYYY-MM-DD format.", END_VALUE, skip_keyboard())
-    context.user_data["draft"]["end_after_count"] = None
-    context.user_data["draft"]["end_date"] = None
-    return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-
-
-async def get_end_value(update, context):
-    value = update.effective_message.text.strip()
-    if value.lower() == "/skip":
-        context.user_data["draft"]["end_after_count"] = None
-        context.user_data["draft"]["end_date"] = None
-    elif context.user_data["draft"].get("end_mode") == "count":
-        try:
-            count = int(value)
-            if count < 1:
-                raise ValueError
-            context.user_data["draft"]["end_after_count"] = count
-            context.user_data["draft"]["end_date"] = None
-        except ValueError:
-            await update.effective_message.reply_text("Enter a positive whole number, or /skip.")
-            return END_VALUE
-    else:
-        try:
-            context.user_data["draft"]["end_date"] = parse_date(value).isoformat()
-            context.user_data["draft"]["end_after_count"] = None
-        except InputError as exc:
-            await update.effective_message.reply_text(str(exc))
-            return END_VALUE
-    return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-
-
-async def get_initial_payment(update, context):
-    value = update.effective_message.text.strip()
-    if value.lower() == "/skip":
-        return await save_draft(update, context)
-    try:
-        amount, currency = parse_money(value)
-        if amount <= 0:
-            raise InputError("Enter an amount greater than zero, or /skip.")
+        context.user_data["draft"]["next_due"] = parse_date(value).isoformat()
     except InputError as exc:
-        await update.effective_message.reply_text(str(exc))
-        return INITIAL_PAYMENT
-    context.user_data["draft"]["initial_paid"] = amount
-    if currency and not context.user_data["draft"].get("currency"):
-        context.user_data["draft"]["currency"] = currency
-    return await send_next(update, context, "When did you pay? Use YYYY-MM-DD, or skip for today.", PAYMENT_DATE, skip_keyboard())
-
-
-async def get_payment_date(update, context):
-    value = update.effective_message.text.strip()
-    if value.lower() == "/skip":
-        context.user_data["draft"]["initial_payment_date"] = user_today(update.effective_user.id).isoformat()
-    else:
-        try:
-            context.user_data["draft"]["initial_payment_date"] = parse_date(value).isoformat()
-        except InputError as exc:
-            await update.effective_message.reply_text(str(exc))
-            return PAYMENT_DATE
+        await update.effective_message.reply_text(str(exc) + " The due date is required.")
+        return DUE
     return await save_draft(update, context)
 
 
@@ -336,35 +201,36 @@ async def save_draft(update, context):
     invoice_id = db.add_invoice(
         user_id,
         title,
-        draft.get("amount_minor"),
-        draft.get("currency"),
-        draft.get("next_due"),
-        draft.get("frequency", "once"),
-        draft.get("interval_days"),
-        draft.get("end_after_count", 1),
-        draft.get("end_date"),
+        None,
+        None,
+        draft["next_due"],
+        "once",
+        None,
+        1,
+        None,
         json.loads(settings["reminder_offsets"]),
     )
-    invoice = db.get_invoice(invoice_id, user_id)
-    if draft.get("initial_paid"):
-        db.record_payment(
-            invoice,
-            draft["initial_paid"],
-            draft.get("initial_payment_date", user_today(user_id).isoformat()),
-        )
-    due = draft.get("next_due") or "not set"
-    amount_text = format_money(draft.get("amount_minor"), draft.get("currency"))
     await update.effective_message.reply_text(
-        "Saved “{}” (#{}).\nAmount: {}\nNext due: {}\nSchedule: {}\n"
-        "Reminders use your settings. Use /list to manage it.".format(
-            title,
-            invoice_id,
-            amount_text,
-            due,
-            draft.get("frequency", "once"),
-        )
+        "Added “{}” (#{}), due {}.\n"
+        "This starts as a one-time reminder. Add an amount, currency, or repeat "
+        "schedule anytime from /list.".format(title, invoice_id, draft["next_due"])
     )
     return ConversationHandler.END
+
+
+async def get_payment_date(update, context):
+    value = update.effective_message.text.strip()
+    if value.lower() == "/skip":
+        context.user_data["payment_date"] = user_today(
+            update.effective_user.id
+        ).isoformat()
+    else:
+        try:
+            context.user_data["payment_date"] = parse_date(value).isoformat()
+        except InputError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return PAYMENT_DATE
+    return await save_partial_payment(update, context)
 
 
 async def skip_current(update, context):
@@ -374,42 +240,6 @@ async def skip_current(update, context):
     if query:
         await query.answer()
     stage = context.user_data.get("stage_prompt", "")
-    if "name or skip" in stage:
-        context.user_data["draft"]["title"] = "Untitled invoice"
-        return await send_next(update, context, "Amount? You can skip or enter a number like 49.99.", AMOUNT, skip_keyboard())
-    if stage.startswith("Amount?"):
-        context.user_data["draft"]["amount_minor"] = None
-        return await send_next(update, context, "Currency code? For example EUR or USD. Skip if you do not want to set one.", CURRENCY, skip_keyboard())
-    if stage.startswith("Currency code"):
-        context.user_data["draft"]["currency"] = None
-        return await send_next(update, context, "Next due date? Use YYYY-MM-DD, or skip if not known.", DUE, skip_keyboard())
-    if stage.startswith("Next due date"):
-        context.user_data["draft"]["next_due"] = None
-        return await send_next(update, context, "How often does it recur?", FREQUENCY, frequency_keyboard())
-    if stage.startswith("Have you already paid"):
-        return await save_draft(update, context)
-    if stage.startswith("When did you pay"):
-        context.user_data["draft"]["initial_payment_date"] = user_today(update.effective_user.id).isoformat()
-        return await save_draft(update, context)
-    if stage.startswith("How many days"):
-        context.user_data["draft"]["frequency"] = "once"
-        context.user_data["draft"]["interval_days"] = None
-        context.user_data["draft"]["end_after_count"] = 1
-        return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-    if stage.startswith("After how many payments") or stage.startswith("Enter the final date"):
-        context.user_data["draft"]["end_after_count"] = None
-        context.user_data["draft"]["end_date"] = None
-        return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-    if stage.startswith("When should reminders stop"):
-        context.user_data["draft"]["end_after_count"] = None
-        context.user_data["draft"]["end_date"] = None
-        return await send_next(update, context, "Have you already paid anything toward this invoice? Enter an amount or skip.", INITIAL_PAYMENT, skip_keyboard())
-    if stage.startswith("Enter a date") and context.user_data.get("flow") == "payment":
-        context.user_data["payment_date"] = user_today(update.effective_user.id).isoformat()
-        return await save_partial_payment(update, context)
-    if stage.startswith("When did you pay?"):
-        context.user_data["payment_date"] = user_today(update.effective_user.id).isoformat()
-        return await save_partial_payment(update, context)
     if stage.startswith("Enter payment date"):
         context.user_data["payment_date"] = user_today(update.effective_user.id).isoformat()
         return await save_partial_payment(update, context)
@@ -428,12 +258,16 @@ async def skip_current(update, context):
     if stage.startswith("Reminder lead days"):
         return await ask_settings_time(update, context)
     if stage.startswith("Reminder time"):
+        return await ask_settings_currency(update, context)
+    if stage.startswith("Default currency"):
         return await finish_settings(update, context)
     await update.effective_message.reply_text("Nothing to skip at this step.")
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
     context.user_data.pop("draft", None)
     context.user_data.pop("flow", None)
     context.user_data.pop("edit_invoice_id", None)
@@ -746,11 +580,12 @@ async def edit_value(update, context):
         elif field == "amount":
             amount, currency = parse_money(value)
             existing = db.get_invoice(invoice_id, user_id)
+            default_currency = db.get_user(user_id)["default_currency"]
             db.update_invoice(
                 invoice_id,
                 user_id,
                 amount_minor=None if amount == 0 else amount,
-                currency=currency or existing["currency"],
+                currency=currency or existing["currency"] or default_currency,
             )
         elif field == "due":
             db.update_invoice(invoice_id, user_id, next_due=None if value.lower() == "/skip" else parse_date(value).isoformat())
@@ -848,6 +683,35 @@ async def get_settings_time(update, context):
         except InputError as exc:
             await update.effective_message.reply_text(str(exc))
             return SETTINGS_TIME
+    return await ask_settings_currency(update, context)
+
+
+async def ask_settings_currency(update, context):
+    user = db.get_user(update.effective_user.id)
+    current = user["default_currency"] or "none"
+    return await send_next(
+        update,
+        context,
+        "Default currency for new amounts? Current: {}. Enter a three-letter code, "
+        "or NONE to clear it. Use /skip to keep the current setting.".format(current),
+        SETTINGS_CURRENCY,
+        skip_keyboard(),
+    )
+
+
+async def get_settings_currency(update, context):
+    value = update.effective_message.text.strip()
+    if value.lower() != "/skip":
+        if value.lower() == "none":
+            currency = None
+        elif len(value) == 3 and value.isalpha():
+            currency = value.upper()
+        else:
+            await update.effective_message.reply_text(
+                "Enter a three-letter currency code such as EUR, NONE, or /skip."
+            )
+            return SETTINGS_CURRENCY
+        db.update_user(update.effective_user.id, default_currency=currency)
     return await finish_settings(update, context)
 
 
@@ -927,15 +791,22 @@ def build_application(token: str) -> Application:
             CallbackQueryHandler(start_full_payment, pattern=r"^paid:\d+:[^:]+$"),
         ],
         states={
-            TITLE: text_state(get_title, skippable=True),
-            AMOUNT: text_state(get_amount, skippable=True),
-            CURRENCY: text_state(get_currency, skippable=True),
-            DUE: text_state(get_due, skippable=True),
-            FREQUENCY: [CallbackQueryHandler(set_frequency, pattern="^freq:"), CallbackQueryHandler(skip_current, pattern="^skip$")],
-            CUSTOM: text_state(get_custom_interval, skippable=True),
-            END_RULE: [CallbackQueryHandler(set_end_rule, pattern="^end:"), CallbackQueryHandler(skip_current, pattern="^skip$")],
-            END_VALUE: text_state(get_end_value, skippable=True),
-            INITIAL_PAYMENT: text_state(get_initial_payment, skippable=True),
+            TITLE: [
+                CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                    get_title,
+                ),
+            ],
+            DUE: [
+                CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                    get_due,
+                ),
+            ],
             PAYMENT_DATE: text_state(get_payment_date, skippable=True),
             EDIT_FIELD: [CallbackQueryHandler(edit_field, pattern="^field:"), CallbackQueryHandler(edit_field, pattern="^editcancel$")],
             EDIT_VALUE: [
@@ -951,9 +822,11 @@ def build_application(token: str) -> Application:
             SETTINGS_TZ: text_state(get_settings_timezone, skippable=True),
             SETTINGS_OFFSETS: text_state(get_settings_offsets, skippable=True),
             SETTINGS_TIME: text_state(get_settings_time, skippable=True),
+            SETTINGS_CURRENCY: text_state(get_settings_currency, skippable=True),
         },
         fallbacks=[
             CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE),
+            CallbackQueryHandler(cancel, pattern="^cancel$"),
             CallbackQueryHandler(skip_current, pattern="^skip$"),
         ],
         allow_reentry=True,

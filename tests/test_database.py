@@ -80,6 +80,13 @@ class DatabaseTests(unittest.TestCase):
             "[1,0]",
         )
 
+    def test_default_currency_can_be_changed_or_cleared(self):
+        self.assertEqual(self.db.get_user(1001)["default_currency"], "EUR")
+        self.db.update_user(1001, default_currency="USD")
+        self.assertEqual(self.db.get_user(1001)["default_currency"], "USD")
+        self.db.update_user(1001, default_currency=None)
+        self.assertIsNone(self.db.get_user(1001)["default_currency"])
+
     def test_snooze_is_not_sent_after_the_invoice_has_advanced(self):
         invoice_id = self.add_invoice()
         invoice = self.db.get_invoice(invoice_id, 1001)
