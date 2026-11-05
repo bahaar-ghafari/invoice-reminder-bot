@@ -73,6 +73,28 @@ def cancel_keyboard():
     )
 
 
+def main_menu_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open menu", callback_data="menu:open")]]
+    )
+
+
+def menu_options_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Add invoice", callback_data="menu:add"),
+                InlineKeyboardButton("List invoices", callback_data="menu:list"),
+            ],
+            [
+                InlineKeyboardButton("Upcoming", callback_data="menu:upcoming"),
+                InlineKeyboardButton("History", callback_data="menu:history"),
+            ],
+            [InlineKeyboardButton("Settings", callback_data="menu:settings")],
+        ]
+    )
+
+
 async def reject_group_callback(update: Update) -> bool:
     if update.effective_chat and update.effective_chat.type != "private":
         if update.callback_query:
@@ -114,14 +136,39 @@ async def send_next(update, context, text, state, keyboard=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.ensure_user(update.effective_user.id)
     await update.message.reply_text(
-        "Hi! I can remind you about bills and keep a payment history.\n\n"
-        "Use /add to create a reminder with just a name and due date. Add other details later from /list.\n"
-        "/list - view and manage invoices\n"
-        "/upcoming - due soon and overdue\n"
-        "/history - payment history\n"
-        "/settings - timezone, reminder preferences, and default currency\n"
-        "/help - all commands and tips"
+        "Hi! I can remind you about bills and keep a payment history. "
+        "Tap below to see the available actions.",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+async def open_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await reject_group_callback(update):
+        return
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "What would you like to do?",
+        reply_markup=menu_options_keyboard(),
+    )
+
+
+async def menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await reject_group_callback(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    if action == "add":
+        return await start_add(update, context)
+    if action == "list":
+        await list_command(update, context)
+    elif action == "upcoming":
+        await upcoming_command(update, context)
+    elif action == "history":
+        await history_command(update, context)
+    elif action == "settings":
+        return await settings_command(update, context)
+    return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -328,7 +375,7 @@ def invoice_summary(invoice):
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invoices = db.list_invoices(update.effective_user.id)
     if not invoices:
-        await update.message.reply_text("No invoices yet. Use /add to create one.")
+        await update.effective_message.reply_text("No invoices yet. Use /add to create one.")
         return
     for invoice in invoices:
         outstanding = None
@@ -343,7 +390,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "\nCurrent installment remaining: {}".format(
                 format_money(outstanding, invoice["currency"])
             )
-        await update.message.reply_text(text, reply_markup=invoice_keyboard(invoice))
+        await update.effective_message.reply_text(text, reply_markup=invoice_keyboard(invoice))
 
 
 async def upcoming_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,7 +411,7 @@ async def upcoming_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if due <= horizon and within_end_date:
                 label = "OVERDUE" if due < today else "due"
                 found.append("{} — {} ({})".format(invoice["next_due"], invoice["title"], label))
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Upcoming and overdue:\n" + "\n".join(found)
         if found
         else "Nothing is due in the next 30 days."
@@ -374,7 +421,7 @@ async def upcoming_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payments = db.list_payments(update.effective_user.id)
     if not payments:
-        await update.message.reply_text("No payments recorded yet.")
+        await update.effective_message.reply_text("No payments recorded yet.")
         return
     lines = [
         "{} — {} — {} (due {})".format(
@@ -385,7 +432,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         for row in payments
     ]
-    await update.message.reply_text("Payment history:\n" + "\n".join(lines))
+    await update.effective_message.reply_text("Payment history:\n" + "\n".join(lines))
 
 
 async def start_full_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -786,6 +833,7 @@ def build_application(token: str) -> Application:
         entry_points=[
             CommandHandler("add", start_add, filters=filters.ChatType.PRIVATE),
             CommandHandler("settings", settings_command, filters=filters.ChatType.PRIVATE),
+            CallbackQueryHandler(menu_action, pattern=r"^menu:(add|list|upcoming|history|settings)$"),
             CallbackQueryHandler(start_edit, pattern=r"^edit:\d+:[^:]+$"),
             CallbackQueryHandler(start_partial_payment, pattern=r"^partial:\d+:[^:]+$"),
             CallbackQueryHandler(start_full_payment, pattern=r"^paid:\d+:[^:]+$"),
@@ -833,6 +881,7 @@ def build_application(token: str) -> Application:
     )
     application.add_handler(conversation)
     application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
+    application.add_handler(CallbackQueryHandler(open_menu, pattern=r"^menu:open$"))
     application.add_handler(CommandHandler("help", help_command, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("list", list_command, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("upcoming", upcoming_command, filters=filters.ChatType.PRIVATE))

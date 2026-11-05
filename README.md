@@ -4,6 +4,7 @@ A private-chat Telegram bot for recurring bills, reminders, and payment history.
 
 ## Features
 
+- `/start` includes a menu for adding invoices, viewing the list, checking upcoming payments and history, and opening settings.
 - Quick `/add` setup asks only for a required name and due date. Add amount, currency, recurrence, stop conditions, and reminders later from `/list`; new amounts use the default currency (EUR initially), configurable in `/settings`.
 - One-time, weekly, monthly, quarterly, yearly, and custom day intervals.
 - Recurrence can stop after a number of payments, on a date, or continue until paused.
