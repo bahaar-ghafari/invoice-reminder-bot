@@ -32,8 +32,8 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-TITLE, DUE = range(2)
-PAYMENT_AMOUNT, PAYMENT_DATE, EDIT_FIELD, EDIT_VALUE, SETTINGS_TZ, SETTINGS_OFFSETS, SETTINGS_TIME, SETTINGS_CURRENCY = range(2, 10)
+TITLE, DUE, FREQUENCY, CUSTOM, END_RULE, END_VALUE = range(6)
+PAYMENT_AMOUNT, PAYMENT_DATE, EDIT_FIELD, EDIT_VALUE, SETTINGS_TZ, SETTINGS_OFFSETS, SETTINGS_TIME, SETTINGS_CURRENCY = range(6, 14)
 
 
 def load_local_env():
@@ -91,6 +91,39 @@ def menu_options_keyboard():
                 InlineKeyboardButton("History", callback_data="menu:history"),
             ],
             [InlineKeyboardButton("Settings", callback_data="menu:settings")],
+        ]
+    )
+
+
+def frequency_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("One time", callback_data="freq:once"),
+                InlineKeyboardButton("Weekly", callback_data="freq:weekly"),
+            ],
+            [
+                InlineKeyboardButton("Monthly", callback_data="freq:monthly"),
+                InlineKeyboardButton("Quarterly", callback_data="freq:quarterly"),
+            ],
+            [
+                InlineKeyboardButton("Yearly", callback_data="freq:yearly"),
+                InlineKeyboardButton("Custom", callback_data="freq:custom"),
+            ],
+            [InlineKeyboardButton("Cancel", callback_data="cancel")],
+        ]
+    )
+
+
+def end_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("After a number of payments", callback_data="end:count"),
+                InlineKeyboardButton("On a date", callback_data="end:date"),
+            ],
+            [InlineKeyboardButton("No end date", callback_data="end:forever")],
+            [InlineKeyboardButton("Cancel", callback_data="cancel")],
         ]
     )
 
@@ -180,8 +213,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/history - review up to 50 recorded payments\n"
         "/settings - set timezone, reminder preferences, and default currency\n"
         "/cancel - cancel the current setup\n\n"
-        "To add a reminder, /add asks only for a name and required due date. "
-        "Add amount, currency, and recurrence later from /list. Use dates like "
+        "To add a reminder, /add asks for a name, due date, repeat schedule, and "
+        "when a recurring reminder should end. Add amount and currency later from /list. Use dates like "
         "2026-12-15. Amounts can include a currency, e.g. 49.99 EUR; otherwise "
         "your default currency from /settings is used. "
         "Reminder days accept values such as 3,0 (three days before "
@@ -219,13 +252,32 @@ async def get_title(update, context):
 
 async def required_skip(update, context):
     draft = context.user_data.get("draft", {})
+    prompt = context.user_data.get("stage_prompt", "")
     if "title" not in draft:
         await update.effective_message.reply_text("A name is required. Enter what this payment is for.")
         return TITLE
-    await update.effective_message.reply_text(
-        "A due date is required. Enter it as YYYY-MM-DD."
+    if "next_due" not in draft:
+        await update.effective_message.reply_text(
+            "A due date is required. Enter it as YYYY-MM-DD."
+        )
+        return DUE
+    required_steps = (
+        ("How often should I remind", "Choose a repeat schedule.", FREQUENCY),
+        ("How many days between reminders", "Enter the custom interval in days.", CUSTOM),
+        (
+            "When should this recurring reminder end",
+            "Choose when the recurring reminder should end.",
+            END_RULE,
+        ),
+        ("After how many payments", "Enter the required payment count.", END_VALUE),
+        ("On what date should this reminder end", "Enter the required end date.", END_VALUE),
     )
-    return DUE
+    for prefix, message, state in required_steps:
+        if prompt.startswith(prefix):
+            await update.effective_message.reply_text(message)
+            return state
+    await update.effective_message.reply_text("This answer is required to add the reminder.")
+    return END_VALUE
 
 
 async def get_due(update, context):
@@ -237,6 +289,120 @@ async def get_due(update, context):
     except InputError as exc:
         await update.effective_message.reply_text(str(exc) + " The due date is required.")
         return DUE
+    return await send_next(
+        update,
+        context,
+        "How often should I remind you? Choose a repeat schedule.",
+        FREQUENCY,
+        frequency_keyboard(),
+    )
+
+
+async def set_frequency(update, context):
+    if await reject_group_callback(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    frequency = query.data.split(":", 1)[1]
+    draft = context.user_data["draft"]
+    draft["frequency"] = frequency
+    draft["interval_days"] = None
+    if frequency == "once":
+        draft["end_after_count"] = 1
+        draft["end_date"] = None
+        return await save_draft(update, context)
+    if frequency == "custom":
+        return await send_next(
+            update,
+            context,
+            "How many days between reminders? Enter a whole number from 1 to 3650.",
+            CUSTOM,
+            cancel_keyboard(),
+        )
+    return await ask_end_rule(update, context)
+
+
+async def get_custom_interval(update, context):
+    try:
+        interval = int(update.effective_message.text.strip())
+        if not 1 <= interval <= 3650:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text(
+            "Enter a whole number from 1 to 3650 days."
+        )
+        return CUSTOM
+    context.user_data["draft"]["interval_days"] = interval
+    return await ask_end_rule(update, context)
+
+
+async def ask_end_rule(update, context):
+    return await send_next(
+        update,
+        context,
+        "When should this recurring reminder end? Choose a limit or explicitly select no end date.",
+        END_RULE,
+        end_keyboard(),
+    )
+
+
+async def set_end_rule(update, context):
+    if await reject_group_callback(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    rule = query.data.split(":", 1)[1]
+    if rule == "count":
+        context.user_data["draft"]["end_mode"] = "count"
+        return await send_next(
+            update,
+            context,
+            "After how many payments should this reminder end? Enter a positive whole number.",
+            END_VALUE,
+            cancel_keyboard(),
+        )
+    if rule == "date":
+        context.user_data["draft"]["end_mode"] = "date"
+        return await send_next(
+            update,
+            context,
+            "On what date should this reminder end? Enter a date in YYYY-MM-DD format.",
+            END_VALUE,
+            cancel_keyboard(),
+        )
+    context.user_data["draft"]["end_after_count"] = None
+    context.user_data["draft"]["end_date"] = None
+    return await save_draft(update, context)
+
+
+async def get_end_value(update, context):
+    draft = context.user_data["draft"]
+    value = update.effective_message.text.strip()
+    if draft.get("end_mode") == "count":
+        try:
+            count = int(value)
+            if count < 1:
+                raise ValueError
+        except ValueError:
+            await update.effective_message.reply_text(
+                "Enter a positive whole number of payments."
+            )
+            return END_VALUE
+        draft["end_after_count"] = count
+        draft["end_date"] = None
+    else:
+        try:
+            end_date = parse_date(value)
+        except InputError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return END_VALUE
+        if end_date < date.fromisoformat(draft["next_due"]):
+            await update.effective_message.reply_text(
+                "The end date must be on or after the first due date."
+            )
+            return END_VALUE
+        draft["end_date"] = end_date.isoformat()
+        draft["end_after_count"] = None
     return await save_draft(update, context)
 
 
@@ -244,23 +410,41 @@ async def save_draft(update, context):
     draft = context.user_data.pop("draft")
     user_id = update.effective_user.id
     settings = db.get_user(user_id)
-    title = draft.get("title", "Untitled invoice")
+    title = draft["title"]
+    frequency = draft["frequency"]
+    if frequency == "custom":
+        schedule = "every {} days".format(draft["interval_days"])
+    else:
+        schedule = frequency
+    if draft.get("end_after_count") is not None and frequency != "once":
+        end_summary = "Ends after {} payments".format(draft["end_after_count"])
+    elif draft.get("end_date"):
+        end_summary = "Ends on {}".format(draft["end_date"])
+    elif frequency != "once":
+        end_summary = "No end date"
+    else:
+        end_summary = "One-time reminder"
     invoice_id = db.add_invoice(
         user_id,
         title,
         None,
         None,
         draft["next_due"],
-        "once",
-        None,
-        1,
-        None,
+        frequency,
+        draft.get("interval_days"),
+        draft.get("end_after_count"),
+        draft.get("end_date"),
         json.loads(settings["reminder_offsets"]),
     )
     await update.effective_message.reply_text(
-        "Added “{}” (#{}), due {}.\n"
-        "This starts as a one-time reminder. Add an amount, currency, or repeat "
-        "schedule anytime from /list.".format(title, invoice_id, draft["next_due"])
+        "Added “{}” (#{}), due {}.\nSchedule: {}\n{}\n"
+        "Add amount or currency anytime from /list.".format(
+            title,
+            invoice_id,
+            draft["next_due"],
+            schedule,
+            end_summary,
+        )
     )
     return ConversationHandler.END
 
@@ -853,6 +1037,30 @@ def build_application(token: str) -> Application:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
                     get_due,
+                ),
+            ],
+            FREQUENCY: [
+                CallbackQueryHandler(set_frequency, pattern="^freq:"),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+            ],
+            CUSTOM: [
+                CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                    get_custom_interval,
+                ),
+            ],
+            END_RULE: [
+                CallbackQueryHandler(set_end_rule, pattern="^end:"),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+            ],
+            END_VALUE: [
+                CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE),
+                CommandHandler("skip", required_skip, filters=filters.ChatType.PRIVATE),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+                    get_end_value,
                 ),
             ],
             PAYMENT_DATE: text_state(get_payment_date, skippable=True),
