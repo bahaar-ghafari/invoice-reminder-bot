@@ -29,6 +29,7 @@ from domain import (
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TITLE, AMOUNT, CURRENCY, DUE, FREQUENCY, CUSTOM, END_RULE, END_VALUE = range(8)
