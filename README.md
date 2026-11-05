@@ -32,6 +32,22 @@ A private-chat Telegram bot for recurring bills, reminders, and payment history.
 
 Keep the process running for scheduled reminders. The database is created at `data/invoices.sqlite3` by default. Back up that file to preserve invoice and payment history.
 
+## Run with Docker Compose
+
+Install Docker Engine and the Docker Compose plugin, then create a `.env` file containing the bot token:
+
+```env
+TELEGRAM_BOT_TOKEN=your_token_from_botfather
+```
+
+Start the bot from the project directory:
+
+```sh
+docker compose up -d --build
+```
+
+Compose keeps the SQLite database in a named volume and restarts the container if it exits. To view logs or stop the bot, run `docker compose logs -f bot` or `docker compose down`. The volume is retained when the container is stopped; back it up regularly.
+
 ## Commands
 
 - `/start` and `/help` — instructions

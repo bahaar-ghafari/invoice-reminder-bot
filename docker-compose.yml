@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      DATABASE_PATH: /data/invoices.sqlite3
+    volumes:
+      - invoices:/data
+
+volumes:
+  invoices:
